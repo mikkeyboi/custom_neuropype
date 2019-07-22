@@ -39,7 +39,8 @@ class ImportPTB(Node):
 
     @classmethod
     def description(cls):
-        return Description(name='Fix Events for Location Rule',
+        return Description(name='Import PyschoPhysicsToolbox data file'
+                                ' from macaque saccade experiments',
                            description="""
                            """,
                            version='0.1',
