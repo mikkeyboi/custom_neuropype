@@ -79,8 +79,9 @@ class ImportPTB(Node):
             'cueTime': 'cuePresentedTime'
         })
 
-        # TODO: Fix lack of stopTime on last trial --> nan
-        # trial_data[-1]['stopTime']
+        # Fix lack of stopTime on last trial --> use last flipScreen.
+        if not isinstance(trial_data[-1]['stopTime'], float) or np.isnan(trial_data[-1]['stopTime']):
+            trial_data[-1]['stopTime'] = max(trial_data[-1]['flipScreen'])
 
         # If needed, replace stopTime with trial duration
         if (trial_data[0]['stopTime'] - trial_data[0]['startTime']) > 0:
@@ -105,15 +106,15 @@ class ImportPTB(Node):
             # Collect trial-level variables
             tr = {'ExperimentType': tr_dat['expType'], 'Block': tr_dat['block'], 'OutcomeCode': tr_dat['outcomeCode'],
                   'TargetChoice': tr_dat['targetChoice'], 'TrialIdx': tr_dat['expTrial'], 'Class': tr_dat['class']}
-            t0 = tr_dat['startTime']
+            trial_t0 = tr_dat['startTime']
             for ev in ev_map:
                 # Check why first trial Time is double but rest are OK.
                 if isinstance(tr_dat[ev[1]], float):  # Is there a faster way to check that it is not empty np.array?
-                    t_delta = tr_dat[ev[1]] if ev[0] != 'Start' else 0
+                    ev_t_delta = tr_dat[ev[1]] if ev[0] != 'Start' else 0
                     ev_dict = {
                         'Marker': ev[0],
-                        'Time': t0 + t_delta,
-                        'EyelinkTime': tr_dat['eyeSyncTime']/1000 + t_delta
+                        'Time': trial_t0 + ev_t_delta,
+                        'EyelinkTime': tr_dat['eyeSyncTime']/1000. + ev_t_delta
                     }
                     df = df.append({**tr, **ev_dict}, ignore_index=True)
 
@@ -123,4 +124,5 @@ class ImportPTB(Node):
                     'gaze_calib_adjust': (gaze_calib_adjust,),  # Need to hide in tuple so it doesn't break enumerator
                     'ptb_params': {k: mat['params'][k][()] for k in mat['params'].dtype.names}
                     }
+
         self._data = Packet(chunks={'markers': Chunk(block=ev_blk, props=ev_props)})
