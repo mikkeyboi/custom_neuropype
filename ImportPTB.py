@@ -118,6 +118,38 @@ class ImportPTB(Node):
                     }
                     df = df.append({**tr, **ev_dict}, ignore_index=True)
 
+        # TODO: Trial Detail Parsing
+        #  See Common\PTB\getTrialStimInfo.m
+
+        # Cue Info. The PTB code uses trial classes for which the value indexes into a predefined colour-map, below.
+        cueColourMap = ['r', 'g', 'b']
+        cueMatrix = [[1, 2], [1, 3], [2, 1], [2, 3], [3, 1], [3, 2]]   # 1=red; 2=green; 3=blue. TODO: 0-based.
+
+        # Target Info for SR3
+        # In Adam's code, the 1:8 part of the class is mapped to theta with
+        # targetTheta = 45*((1:8)-8-1); then the targetPt is calculated as
+        # target_yx = centre_yx + radius*[-cosd(targetTheta) sind(targetTheta)];
+        # Notice yx, not xy. Then he fliplr's the result.
+        # This can be more simply represented the following way.
+        targetTheta = np.deg2rad([270, 315, 0, 45, 90, 135, 180, 225])
+        targetStr = ['UU', 'UR', 'RR', 'DR', 'DD', 'DL', 'LL', 'UL']  # The y-zero was up, so flip u/d.
+        centrePt = mat['params']['subjectScreenResolution'][()] / 2
+
+        # Only needed for SR4: groups for general rules.
+        context_options = ['AnyUp', 'AnyDown', 'AnyLeft', 'AnyRight']
+        # [d;d;d],[u;u;u]
+        # [l;l;l];[r;r;r]
+        targGroups = np.array([[[8, 1, 2], [6, 5, 4]], [[8, 7, 6], [2, 3, 4]]])
+        targDistGroups = np.stack((targGroups, np.flip(targGroups, axis=1)), axis=-1)
+
+        uq_exp, uq_idx = np.unique(df['ExperimentType'], return_inverse=True)
+        for _ix, expType in enumerate(uq_exp):
+            b_trial = uq_idx == _ix
+            classes = df[b_trial]['Class']
+            nTrials = len(classes)
+
+            trialTypes = ['unknown'] * nTrials
+
         iax = InstanceAxis(df['Time'].values, data=df.drop(columns=['Time']).to_records(index=False))
         ev_blk = Block(data=np.nan * np.ones((len(iax),)), axes=(iax,))
         ev_props = {Flags.is_event_stream: True,
