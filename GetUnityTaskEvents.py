@@ -69,6 +69,7 @@ class GetUnityTaskEvents(Node):
             tasktype_map = {0: 'AttendShape', 1: 'AttendColour', 2: 'AttendDirection'}
             countermand_map = {0: 'Prosaccade', 1: 'TargetSwitch', 2: 'NoGo', 3: 'Antisaccade'}
             position_map = {-1: 'Unknown', 0: 'Left', 1: 'Right', 2: 'NoGo'}
+            cue_type_map = {0: 'Prosaccade', 1: 'Antisaccade'}
 
             """
             There are many more events than we need, including events for positioning invisible targets and changing
@@ -123,6 +124,7 @@ class GetUnityTaskEvents(Node):
                 ('SelectedObjectIndex', int, ValueProperty.INTEGER + ValueProperty.CATEGORY),
                 ('IsCorrect', bool, ValueProperty.NONNEGATIVE),
                 ('ReactionTime', float, ValueProperty.UNKNOWN),
+                ('CueTypeIndex', object, ValueProperty.STRING + ValueProperty.CATEGORY),
             ]
             field_names, field_types, field_props = zip(*field_name_type_prop)
             ra_dtype = list(zip(zip(field_props, field_names), field_types))  # For recarray
@@ -161,7 +163,7 @@ class GetUnityTaskEvents(Node):
                 tr_types = ev_types[b_tr]
                 if 'TrialState' not in tr_types:
                     continue
-                tr_times = ev_times[b_tr]
+
                 tr_events = np.array(events)[b_tr]
 
                 tr_phases = np.array([_['TrialState']['trialPhaseIndex']
@@ -185,106 +187,105 @@ class GetUnityTaskEvents(Node):
                     'SelectedObjectIndex': fbstate['selectedObjectIndex'],  # TODO: Map to object name
                     'IsCorrect': fbstate['isCorrect'],
                     'CountermandingDelay': np.nan,
-                    'ReactionTime': np.nan
+                    'ReactionTime': np.nan,
+                    # CueTypeIndex. For "TaskSwitch" experiment, tells if trial is Pro or Anti-saccade.
+                    'CueTypeIndex': cue_type_map[fbstate['saccadeIndex']] if 'saccadeIndex' in fbstate else -1
                 }
-                # Get some more details that we can only get from other events.
 
-                # 'CuedObject'
+                # Get some more details that we can only get from events.
+                df_to_extend = []
+                tr_times = ev_times[b_tr]
+                tr_is_obj = tr_types == 'ObjectInfo'
+                tr_obj_is_vis = np.array([tr_events[_]['ObjectInfo']['_isVisible'] if tr_is_obj[_] else False
+                                          for _ in range(len(tr_events))])
+                tr_obj_id = np.array([tr_events[_]['ObjectInfo']['_identity'] if tr_is_obj[_] else None
+                                      for _ in range(len(tr_events))])
+
+                # Event 1 - Intertrial. ObjectInfo cue placed but hidden. Use phase transition.
+                df_to_extend.append({'Marker': 'Intertrial'})
+                iti_ix = np.where(tr_phases == phase_inv_map['Intertrial'])[0][0]
+                out_times.append(tr_times[iti_ix])
+
+                # Event 2 - Fixation achieved. Use phase transition.
+                if phase_inv_map['Fixate'] in tr_phases:
+                    df_to_extend.append({'Marker': 'Fixate'})
+                    fix_start_ix = np.where(tr_phases == phase_inv_map['Fixate'])[0][0]
+                    out_times.append(tr_times[fix_start_ix])
+
+                # Event 3 - Cue presentation. Transition to phase 3 and Object appears (maybe reversed order)
                 if phase_inv_map['Cue'] in tr_phases:
-                    ph_ix = np.where(tr_phases == phase_inv_map['Cue'])[0][0]
-                    cue_ix = np.where(tr_types[:ph_ix] == 'ObjectInfo')[0][-1]
-                    details['CuedObject'] = tr_events[cue_ix]['ObjectInfo']['_identity']
-                else:
-                    cue_ix = None
+                    df_to_extend.append({'Marker': 'Cue'})
+                    cue_ix = np.where(tr_phases == phase_inv_map['Cue'])[0][0]
+                    # TODO: Current experiment does not have a ObjectInfo event near time of cue.
+                    # obj_ix = np.where(tr_obj_is_vis)[0][np.argmin(np.abs(tr_times[tr_obj_is_vis] - tr_times[cue_ix]))]
+                    # details['CuedObject'] = tr_obj_id[obj_ix]
+                    out_times.append(tr_times[cue_ix])  # TODO: use obj_ix in new experiment.
 
-                # Get go time
+                # Event 4 - Delay period. ObjectInfo cue disappears; transition to phase 4.
+                if phase_inv_map['Delay'] in tr_phases:
+                    df_to_extend.append({'Marker': 'Delay'})
+                    pre_ix = np.where(tr_phases == phase_inv_map['Cue'])[0][0]
+                    ph_ix = np.where(tr_phases == phase_inv_map['Delay'])[0][0]
+                    del_ix = pre_ix + np.where(tr_is_obj[pre_ix:ph_ix])[0][0]
+                    out_times.append(tr_times[del_ix])
+
+                # Event 5 - Target presentation. ObjectInfo targets appear; transition to phase 5.
+                if phase_inv_map['Target'] in tr_phases:
+                    df_to_extend.append({'Marker': 'Target'})
+                    targ_ix = np.where(np.logical_and(tr_obj_id == 'Target', tr_obj_is_vis))[0]
+                    if len(targ_ix) > 0:
+                        targ_ix = targ_ix[-1]
+                    else:
+                        targ_ix = np.where(tr_phases == phase_inv_map['Target'])[0][0]
+                    out_times.append(tr_times[targ_ix])
+
+                # Event 6 - Imperative cue. Fixation pt disappears. Transition to Phase 6.
                 if phase_inv_map['Go'] in tr_phases:
-                    ph_ix = np.where(tr_phases == phase_inv_map['Go'])[0][0]
-                    obj_ix = np.where(tr_types[:ph_ix] == 'ObjectInfo')[0][-1]
-                    obj_inf = tr_events[obj_ix]['ObjectInfo']
-                    go_ix = obj_ix if (obj_inf['_identity'] == 'CentralFixation') and (not obj_inf['_isVisible'])\
-                        else ph_ix
+                    df_to_extend.append({'Marker': 'Go'})
+                    go_ix = np.where(np.logical_and(tr_obj_id == 'CentralFixation', ~tr_obj_is_vis))[0]
+                    if len(go_ix) > 0:
+                        go_ix = go_ix[0]
+                    else:
+                        go_ix = np.where(tr_phases == phase_inv_map['Go'])[0][0]
                     go_time = tr_times[go_ix]
+                    out_times.append(go_time)
                 else:
-                    go_ix = None
+                    logger.debug("Go cue not found for trial {}.".format(tr_ind))
 
+                # Event 7 (optional) - Countermanding cue.
                 # Get countermanding delay
                 if details['CountermandingType'] != 'Prosaccade' and phase_inv_map['Countermand'] in tr_phases:
-                    ph_ix = np.where(tr_phases == phase_inv_map['Countermand'])[0][0]
-                    obj_ix = ph_ix + np.where(tr_types[ph_ix:] == 'ObjectInfo')[0][0]
-                    obj_inf = tr_events[obj_ix]['ObjectInfo']
-                    cm_ix = obj_ix if (obj_inf['_identity'] == 'CentralFixation') and obj_inf['_isVisible'] else ph_ix
-                    details['CountermandingDelay'] = tr_times[cm_ix] - go_time
-                else:
-                    cm_ix = None
+                    df_to_extend.append({'Marker': 'Countermand'})
 
+                    # Find last fixation-visible event before response period.
+                    resp_ix = np.where(tr_phases == phase_inv_map['Response'])[0][0]
+                    b_countermand = np.logical_and(tr_obj_id[:resp_ix] == 'CentralFixation', tr_obj_is_vis[:resp_ix])
+                    cm_ix = np.where(b_countermand)[0]
+                    if len(cm_ix) > 0:
+                        cm_ix = cm_ix[-1]
+                    else:
+                        cm_ix = np.where(tr_phases == phase_inv_map['Countermand'])[0][0]
+                    details['CountermandingDelay'] = tr_times[cm_ix] - go_time
+                    out_times.append(tr_times[cm_ix])
+
+                # Event 8 - Response. Without pupil data yet, we use Input event.
                 # Get reaction time
                 if phase_inv_map['Response'] in tr_phases:
+                    df_to_extend.append({'Marker': 'Response'})
                     ph_ix = np.where(tr_phases == phase_inv_map['Response'])[0][0]
                     resp_ix = ph_ix + np.where(tr_types[ph_ix:] == 'Input')[0]
                     resp_ix = [_ for _ in resp_ix if tr_events[_]['Input']['selectedObjectClass'] != 'Fixation']
                     resp_ix = resp_ix[0] if len(resp_ix) > 0 else ph_ix
                     details['ReactionTime'] = tr_times[resp_ix] - go_time
-                else:
-                    resp_ix = None
-
-                # Append timestamp and details for each interesting event.
-                # Event 1 - Intertrial. ObjectInfo cue placed but hidden. Use phase transition.
-                ph_ix = np.where(tr_phases == phase_inv_map['Intertrial'])[0][0]
-                df = df.append({'Marker': 'Intertrial', **details}, ignore_index=True)
-                out_times.append(tr_times[ph_ix])
-
-                # Event 2 - Fixation achieved. Use phase transition.
-                if phase_inv_map['Fixate'] in tr_phases:
-                    fix_start_ix = np.where(tr_phases == phase_inv_map['Fixate'])[0][0]
-                    df = df.append({'Marker': 'Fixate', **details}, ignore_index=True)
-                    out_times.append(tr_times[fix_start_ix])
-
-                # Event 3 - Cue presentation. Object info cue appears, transition to phase 3.
-                # Already found above while getting cued object.
-                if cue_ix is not None:
-                    df = df.append({'Marker': 'Cue', **details}, ignore_index=True)
-                    out_times.append(tr_times[cue_ix])
-
-                # Event 4 - Delay period. ObjectInfo cue disappears; transition to phase 4.
-                if phase_inv_map['Delay'] in tr_phases:
-                    pre_ix = np.where(tr_phases == phase_inv_map['Cue'])[0][0]
-                    ph_ix = np.where(tr_phases == phase_inv_map['Delay'])[0][0]
-                    del_ix = pre_ix + np.where(tr_types[pre_ix:ph_ix] == 'ObjectInfo')[0][0]
-                    df = df.append({'Marker': 'Delay', **details}, ignore_index=True)
-                    out_times.append(tr_times[del_ix])
-
-                # Event 5 - Target presentation. ObjectInfo targets appear; transition to phase 5.
-                if phase_inv_map['Target'] in tr_phases:
-                    ph_ix = np.where(tr_phases == phase_inv_map['Target'])[0][0]
-                    targ_ix = np.where(tr_types[:ph_ix] == 'ObjectInfo')[0][0]
-                    df = df.append({'Marker': 'Target', **details}, ignore_index=True)
-                    out_times.append(tr_times[targ_ix])
-
-                # Event 6 - Imperative cue. Fixation pt disappears. Transition to Phase 6.
-                # Already found above.
-                if go_ix is not None:
-                    df = df.append({'Marker': 'Go', **details}, ignore_index=True)
-                    out_times.append(tr_times[go_ix])
-                else:
-                    logger.debug("Go cue not found for trial {}.".format(tr_ind))
-
-                # Event 7 (optional) - Countermanding cue.
-                # Already found above.
-                if cm_ix is not None:
-                    df = df.append({'Marker': 'Countermand', **details}, ignore_index=True)
-                    out_times.append(tr_times[cm_ix])
-
-                # Event 8 - Response. Without pupil data yet, we use Input event.
-                # Already found above.
-                if resp_ix is not None:
-                    df = df.append({'Marker': 'Response', **details}, ignore_index=True)
                     out_times.append(tr_times[resp_ix])
 
                 # Event 9 - Feedback. Use phase transition.
-                ph_ix = np.where(tr_phases == phase_inv_map['Feedback'])[0][0]
-                df = df.append({'Marker': 'Feedback', **details}, ignore_index=True)
-                out_times.append(tr_times[ph_ix])
+                df_to_extend.append({'Marker': 'Feedback'})
+                fb_ix = np.where(tr_phases == phase_inv_map['Feedback'])[0][0]
+                out_times.append(tr_times[fb_ix])
+
+                for new_ev in df_to_extend:
+                    df = df.append(dict(new_ev, **details), ignore_index=True)
 
             # Try to infer column datatypes.
             # df.infer_objects()  <- requires pandas >= 0.21
