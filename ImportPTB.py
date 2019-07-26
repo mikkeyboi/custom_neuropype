@@ -7,26 +7,6 @@ from neuropype.utilities.cloud import storage
 
 logger = logging.getLogger(__name__)
 
-# Cue Info. The PTB code uses trial classes for which the value indexes into a predefined colour-map, below.
-cueColourMap = ['r', 'g', 'b']
-cueMatrix = [[1, 2], [1, 3], [2, 1], [2, 3], [3, 1], [3, 2]]  # 1=red; 2=green; 3=blue. TODO: 0-based.
-
-# Target Info for SR3
-# In Adam's code, the 1:8 part of the class is mapped to theta with
-# targetTheta = 45*((1:8)-8-1); then the targetPt is calculated as
-# target_yx = centre_yx + radius*[-cosd(targetTheta) sind(targetTheta)];
-# Notice yx, not xy. Then he fliplr's the result.
-# This can be more simply represented the following way.
-targetTheta = np.deg2rad([270, 315, 0, 45, 90, 135, 180, 225])
-targetStr = ['UU', 'UR', 'RR', 'DR', 'DD', 'DL', 'LL', 'UL']  # The y-zero was up, so flip u/d.
-
-# Only needed for SR4: groups for general rules.
-context_options = ['AnyUp', 'AnyDown', 'AnyLeft', 'AnyRight']
-# [d;d;d],[u;u;u]
-# [l;l;l];[r;r;r]
-targGroups = np.array([[[8, 1, 2], [6, 5, 4]], [[8, 7, 6], [2, 3, 4]]])
-targDistGroups = np.stack((targGroups, np.flip(targGroups, axis=1)), axis=-1)
-
 
 class ImportPTB(Node):
     # --- Input/output ports ---
@@ -80,14 +60,6 @@ class ImportPTB(Node):
 
         # Do I need mat['DIO'].dtype.names? So far, no.
 
-        # Save online eyetracker calibration adjustments
-        if 'CALADJ' in mat:
-            gaze_calib_adjust = mat['CALADJ']
-        elif 'eyePosCalibAdjust' in mat['eData'].dtype.names:
-            gaze_calib_adjust = mat['eData']['eyePosCalibAdjust'][()]
-        else:
-            gaze_calib_adjust = None
-
         # Normalize field names that vary across data sets.
         import numpy.lib.recfunctions as rfn
         trial_data = rfn.rename_fields(trial_data, {
@@ -115,7 +87,9 @@ class ImportPTB(Node):
             trial_data = rfn.drop_fields(trial_data, ['class'])
             trial_data = rfn.rename_fields(trial_data, {'targetChoice': 'class'})
 
-        # Create an event stream chunk using each important event in each trial
+        # Create a pandas dataframe with one row per each important event.
+        # Each row within a trial will share many common values (see tr_map and check_map).
+        # Rows within a trial will vary in the 'Marker', 'Time', and 'EyelinkTime' columns.
         import pandas as pd
         tr_map = {'ExperimentType': 'expType', 'Block': 'block', 'OutcomeCode': 'outcomeCode',
                   'TargetChoice': 'targetChoice', 'TrialIdx': 'expTrial', 'Class': 'class'}
@@ -143,255 +117,275 @@ class ImportPTB(Node):
                         'EyelinkTime': tr_dat['eyeSyncTime']/1000. + ev_t_delta
                     }
                     df = df.append({**tr, **ev_dict}, ignore_index=True)
+        df = df.infer_objects()
 
-        centrePt = mat['params']['subjectScreenResolution'][()] / 2
+        centre_point = mat['params']['subjectScreenResolution'][()] / 2
 
+        # We also want, for each trial, to get the stimulus information.
+        # This is a bit tricky because the relationship between PTB variables and the actual stimulus
+        # depends on the experiment type. Some files have more than one experiment type.
+
+        # Get per-trial indices into target_theta (targ/dist), cue_colour_map, and per trial radii
+        # Cue Info. The PTB code uses trial classes for which the value indexes into a predefined colour-map, below.
+        cue_colour_map = np.array(['r', 'g', 'b'])
+        cue_matrix = np.array([[0, 1], [0, 2], [1, 0], [1, 2], [2, 0], [2, 1]])  # 1=red; 2=green; 3=blue.
+
+        # Target Info for SR3
+        # In Adam's code, the 1:8 part of the class is mapped to theta with
+        # target_theta = 45*((1:8)-8-1); then the targetPt is calculated as
+        # target_yx = centre_yx + radius*[-cosd(target_theta) sind(target_theta)];
+        # Notice yx, not xy. Then he fliplr's the result.
+        # This can be more simply represented the following way.
+        target_theta = np.deg2rad([270, 315, 0, 45, 90, 135, 180, 225])
+        target_str = np.array(['UU', 'UR', 'RR', 'DR', 'DD', 'DL', 'LL', 'UL'])  # The y-zero was up, so flip u/d.
+
+        # Only needed for SR4: groups for general rules.
+        context_options = np.array(['AnyUp', 'AnyDown', 'AnyLeft', 'AnyRight'])
+        # [d;d;d],[u;u;u]
+        # [l;l;l];[r;r;r]
+        target_groups = np.array([[[7, 0, 1], [5, 4, 3]], [[7, 6, 5], [1, 2, 3]]])
+        targdist_groups = np.stack((target_groups, np.flip(target_groups, axis=1)), axis=-1)
+
+        # Additional columns added to the data frame:
+        # NewType = 'M', 'A', 'SR3', or 'SR4'
+        # CueColour = 'r', 'g', or 'b'
+        # TrainingLevel = 0: full exp;              1: fix only;      2: fix & dist;
+        #                 3: full exp & invis dist; 4: 3 + extra cue; 5: 4 + extra cue
+        # TargetRule = 'UU', 'UR', 'RR', etc. OR 'AnyUp', 'AnyRight', etc.
+        # Radius = target/distractor radius in polar coordinates.
+        # TargetClass = in 1:8 for 8 locations, or in 1:16 with two annuli.
+        # TargetPol = theta
+        # Target[X,Y] = [x y] coordinates in screen pixels.
+        # (also distClass, distPol, distXY)
+        stim_info = {
+            'NewType': np.array([''] * len(df), dtype=object),
+            'CueColour': np.array(['_'] * len(df)),
+            'TrainingLevel': np.nan * np.ones((len(df),)),
+            'TargetRule': np.array([''] * len(df), dtype=object),
+            'Radius': np.zeros((len(df)), dtype=int),
+        }
+        for td_str in ['Target', 'Distractor']:
+            stim_info = {
+                **stim_info,
+                td_str + 'Class': np.zeros((len(df)), dtype=int),
+                td_str + 'Theta': np.nan * np.ones((len(df),)),
+                td_str + 'X': np.nan * np.ones((len(df),)),
+                td_str + 'Y': np.nan * np.ones((len(df),)),
+                td_str + 'Str': np.array([''] * len(df), dtype=object),
+            }
 
         uq_exp, uq_idx = np.unique(df['ExperimentType'], return_inverse=True)
-        for _ix, expType in enumerate(uq_exp):
-            b_trial = uq_idx == _ix
-            classes = df[b_trial]['Class']
-            nTrials = len(classes)
+        for _ix, exp_type in enumerate(uq_exp):
+            b_trial = uq_idx == _ix  # Trials in this experiment type.
+            n_trials = np.sum(b_trial)
 
-            trialTypes = ['unknown'] * nTrials
-
-            # Trial type can be determined based on the experiment type for expTypes M and A.
-            """
-            if strcmpi(expType, 'M')
-                radius = ptbParams.FMgridLength./(2*(ptbParams.FMnumAnnuli:-1:1));
-                fixJitterXY = [0 0]; %Add to fix/targ/distr XY
-                trialTypes = repmat({'M'}, 1, nTrials);
-            elseif strcmpi(expType, 'A')
-                radius = ptbParams.targetDistance;  % ??
-                trialTypes = repmat({'A'}, 1, nTrials);
-            """
-            # For expType C or D, we need more information, and that can change on a per-trial basis.
-            # Trial type for expType C and D is more complicated.
-            # Ultimately it comes down to whether the PTB code calls
-            # dSR3T2c_setscreens2 or dSR4T2c_setscreens2. The code path is as
-            # follows:
-            # (start in saccadeGUImain)
-            # if on probation -> doSR3Trial2e
-            # if not on probation -> doSR3Trial2d
-            #
-            # Whether or not we are on probation can be changed throughout the
-            # experiment with a key press -> saved to trials.SR3errorStrategy,
-            # but only on the trial for which the key was pressed (how can we
-            # know what the error strategy was at the beginning of the
-            # experiment?!)
-            #
-            # doSR3Trial2e runs the same trial over and over until 2/3 are
-            # successful, then it calls dSR3T2c_setscreens2
-            # doSR3Trial2d runs dSR3T2c_setscreens2 if expType C, or
-            # dSR4T2c_setscreen2 if expType D.
-            #
-            # so, expType C is always dSR3T2c_setscreens2
-
-            if expType == 'C':
-                radius = mat['params']['SR3radius'][()]
-                fixJitterXY = [mat['params'][_][()] for _ in ['SR3Xtranslate', 'SR3Ytranslate']]
-                trialTypes = ['SR3'] * nTrials
-
-            elif expType == 'D':
-                # TODO: Test indexing [1] for params arrays
-                radius = mat['params']['SR3radius'][1]
-                fixJitterXY = [mat['params'][_][1] for _ in ['SR3Xtranslate', 'SR3Ytranslate']]
-                trialTypes = ['SR4'] * nTrials
+            # For most experiments, the trial type is constant throughout.
+            trial_types = [{'M': 'M', 'A': 'A', 'C': 'SR3', 'D': 'SR4'}[exp_type]] * n_trials
+            # But this isn't necessarily true for exp_type D.
+            if exp_type == 'D':
+                # Ultimately it comes down to whether the PTB code calls
+                # dSR3T2c_setscreens2 or dSR4T2c_setscreens2. The code path is as
+                # follows:
+                # (start in saccadeGUImain)
+                # if on probation -> doSR3Trial2e
+                # if not on probation -> doSR3Trial2d
+                #
+                # Whether or not we are on probation can be changed throughout the
+                # experiment with a key press -> saved to trials.SR3errorStrategy,
+                # but only on the trial for which the key was pressed (how can we
+                # know what the error strategy was at the beginning of the
+                # experiment?!)
+                #
+                # doSR3Trial2e runs the same trial over and over until 2/3 are
+                # successful, then it calls dSR3T2c_setscreens2
+                # doSR3Trial2d runs dSR3T2c_setscreens2 if exp_type C, or
+                # dSR4T2c_setscreen2 if exp_type D.
+                #
+                # so, exp_type C is always dSR3T2c_setscreens2
                 if mat['params']['currSession'][()] <= 49:
                     # JerryLee sra3_2 before 090626 are actually SR3, but every sra3_2
                     # after that is SR4. I haven't yet spotted a sure-fire way to know
                     # that other than from the date.
-                    trialTypes = ['SR3'] * nTrials
+                    trial_types = ['SR3'] * n_trials
                 else:
                     b_has_strat = ~df['SR3errorStrategy'].isna()
-                    print("TODO: Test this")
-                    """
-                    err_chng_to = [trials(b_has_strat).SR3errorStrategy];
-                    err_chng_to = {err_chng_to.error};
-                    # if we don't know the beginning error strategy, assume
-                    # resample.
+                    err_chng_to = df[b_has_strat]['SR3errorStrategy']
+                    # err_chng_to = {err_chng_to.error}  # TODO: What's this?
+                    # if we don't know the beginning error strategy, assume resample.
                     if ~b_has_strat[0]:
-                        b_has_strat[0] = true
-                        err_chng_to = ['resample' err_chng_to]
+                        b_has_strat[0] = True
+                        err_chng_to = ['resample'] + err_chng_to
 
-                    is_prob = np.zeros((nTrials,), dtype=bool);
-                    err_chng_id = np.where(has_err_strat)[0]
-                    for e_ix in range(len(err_chng_id))
+                    is_prob = np.zeros((n_trials,), dtype=bool)
+                    err_chng_id = np.where(b_has_strat)[0]
+                    for e_ix in range(len(err_chng_id)):
                         if e_ix == len(err_chng_id):
-                            this_ix = err_chng_id[e_ix]:nTrials;
+                            this_slice = np.s_[err_chng_id[e_ix]:n_trials]
                         else:
-                            this_ix = err_chng_id[e_ix]:err_chng_id(e_ix + 1) - 1
+                            this_slice = np.s_[err_chng_id[e_ix]:err_chng_id(e_ix + 1) - 1]
 
-                        is_prob(this_ix) = strcmpi(err_chng_to{e_ix}, 'probation')
+                        is_prob[this_slice] = err_chng_to[e_ix] == 'probation'
 
-                    trialTypes(is_prob) = repmat({'SR3'}, 1, sum(is_prob));
-                    """
+                    trial_types[is_prob] = ['SR3'] * sum(is_prob)
+
+            if exp_type == 'M':
+                radius = mat['params']['FMgridLength'] / 2*mat['params']['FMnumAnnuli:-1:1))']
+                fix_jitter_xy = [0, 0]  # Add to fix/targ/distr XY
+            elif exp_type == 'A':
+                radius = mat['params']['targetDistance']
+            elif exp_type == 'C':
+                radius = [mat['params']['SR3radius'][()]]
+                fix_jitter_xy = [mat['params'][_][()] for _ in ['SR3Xtranslate', 'SR3Ytranslate']]
+            elif exp_type == 'D':
+                # TODO: Test indexing [1] for params arrays
+                radius = mat['params']['SR3radius'][1]
+                fix_jitter_xy = [mat['params'][_][1] for _ in ['SR3Xtranslate', 'SR3Ytranslate']]
 
             # Training levels for each trial.
             # Determines whether target,distractor were used.
-            trainingLevels = np.zeros((nTrials,))
+            training_levels = np.zeros((n_trials,))
             # TODO: Should SR3trainingLevel or SR3InitialtrainingLevel get priority here?
             b_tr = ~df['SR3trainingLevel'].isna()
-            trainingLevels[b_tr] = df['SR3trainingLevel'][b_tr]
+            training_levels[b_tr] = df['SR3trainingLevel'][b_tr]
             b_itr = df['SR3trainingLevel'].isna() & ~df['SR3trainingLevel'].isna()
-            trainingLevels[b_itr] = df['SR3InitialtrainingLevel'][b_itr]
-            targBool = trainingLevels != 1  # trial has target
-            distBool = np.in1d(trainingLevels, [1, 3, 4])  # trial has distractor
-            # [trials(trialBool(~distBool)).newType] = deal('CentreOut');
+            training_levels[b_itr] = df['SR3InitialtrainingLevel'][b_itr]
 
-            # Get per-trial indices into targetTheta (targ/dist), cueColourMap, and per trial radii
+            b_targ = training_levels != 1  # trial has target
+            b_dist = np.in1d(training_levels, [1, 3, 4])  # trial has distractor
+            # df[b_trial & ~b_dist].newType = 'CentreOut'
+
             #  method depends on trialType
+            n_exp_trials = np.sum(b_trial)
+            targ_ix = np.zeros((n_exp_trials,), dtype=int)
+            dist_ix = np.zeros((n_exp_trials,), dtype=int)
+            cue_colour_ix = np.zeros((n_exp_trials,), dtype=int)
+            annulus_ix = np.zeros((n_exp_trials,), dtype=int)
+            contexts = np.array([''] * n_exp_trials, dtype=object)
 
-            nExpTrials = np.sum(b_trial)
-            targ_ix = np.nan * np.ones((nExpTrials,))     # 1-based
-            dist_ix = np.nan * np.ones((nExpTrials,))     # 1-based
-            cueCol_ix = np.nan * np.ones((nExpTrials,))   # 1-based
-            annulus_ix = np.nan * np.ones((nExpTrials,))  # 1-based
-            contexts = [] * nExpTrials
+            classes = df[b_trial]['Class']
 
-            uq_types, uq_inds = np.unique(trialTypes, return_inverse=True)
+            uq_types, uq_inds = np.unique(trial_types, return_inverse=True)
             for type_ix, trial_type in enumerate(uq_types):
                 b_type = uq_inds == type_ix
-                temp = classes[b_type]
+                type_classes = classes[b_type] - 1  # -1 because we use 0-based indexing here unlike Matlab 1-based.
                 if trial_type == 'M':
                     flip_names = ['fixationOnset', 'targetOnset', 'fixationOffset', 'imperativeCue', 'saccadeEnd',
                                   'targetAcqLost']
                     # It was tough to follow the PTB code, I don't know if the above is correct.
                     # For "M" trials, we are looking for correct saccades typically after flipScreen 2 or 3
-                    # ??? Class 1 is up, then around the face of a clock in 45
-                    # degree increments until 8. If 9:16 present, those are the same except larger amplitude.
-                    targ_ix[b_type] = temp % 8
-                    targ_ix[targ_ix == 0] = 8
-                    annulus_ix[b_type] = 1 + (temp - targ_ix[b_type]) / 8
-                    cueCol_ix[b_type] = 1
+                    # ??? Class 0 is up, then around the face of a clock in 45
+                    # degree increments until 7. If 8:15 present, those are the same except larger amplitude.
+                    targ_ix[b_type] = type_classes % 8
+                    annulus_ix[b_type] = np.floor(type_classes / 8).astype(int)
+                    cue_colour_ix[b_type] = 0
                 elif trial_type == 'A':
-                    logger.warning("Not yet implemented expType A.")
+                    logger.warning("Not yet implemented exp_type A.")
                 elif trial_type == 'SR3':
                     flip_names = ['fixationOnset', 'targetOnset', 'cueOnset', 'cueOffset', 'fixationOffset',
-                                  'targetAcqLost']
-                    # imperativeCue == fixationOffset
-                    # trial class = 8*(cueRow-1) + 4*(cueIndex-1) + targetConfig
-                    # I rename targetConfig -> theta_targ_ix
-                    # cueRow is in 1:length(cueMatrix), chosen rand at the start of each block
-                    # targetConfig is in 1:4, representing 4 direction pairs, rand per block
-                    # cueIndex is in 1:2, when 1 the targ is in first half, 2: targ in
-                    # second half. targets are in [270 315 0 45 90 135 180 225]
-                    # targetChoice, in 1:8, = 4*(cueIndex-1) + targetConfig
-                    cueRow = np.ceil(temp / 8)
-
-                    temp = temp - 8 * (cueRow - 1)
-                    cueIndex = np.ceil(temp / 4)
-
-                    temp = temp - 4 * (cueIndex - 1)
-                    targetConfig = temp
-
-                    targ_ix[b_type] = 4 * (cueIndex - 1) + targetConfig
-                    dist_ix[b_type] = targ_ix[b_type] + 4 * (targ_ix[b_type] < 5) - 4 * (targ_ix[b_type] > 4)
-
-                    # TODO: cueCol_ix[b_type] = sub2ind(cueMatrix.shape, cueRow, cueIndex)
-                    annulus_ix[b_type] = 1
-                    contexts[b_type] = targetStr(targ_ix[b_type])
+                                  'targetAcqLost']  # fixationOffset is the imperative cue.
+                    # trial class = target_config + 4*cue_index + 8*cue_row
+                    # target_config is in 0:3, representing 4 direction pairs, rand per block
+                    # I rename target_config -> theta_targ_ix
+                    # cue_index is in 0:1, indexing which half target is in.
+                    # --> targets are in [270 315 0 45 90 135 180 225]
+                    # cue_row is in 0:length(cue_matrix)-1, chosen rand at the start of each block
+                    # targetChoice is in 0:7, = 4*cue_index + target_config
+                    cue_row = np.floor(type_classes / 8).astype(int)
+                    cue_index = np.floor((type_classes - 8 * cue_row) / 4).astype(int)
+                    target_config = type_classes - 8 * cue_row - 4 * cue_index
+                    targ_ix[b_type] = 4 * cue_index + target_config
+                    dist_ix[b_type] = targ_ix[b_type] + 4 * (targ_ix[b_type] < 4) - 4 * (targ_ix[b_type] > 3)
+                    cue_colour_ix[b_type] = np.ravel_multi_index((cue_row, cue_index), cue_matrix.shape)
+                    annulus_ix[b_type] = 0
+                    contexts[b_type] = target_str[targ_ix[b_type].tolist()]
                 elif trial_type == 'SR4':
-                    flip_names = ['fixationOnset', 'targetOnset', 'cueOnset', 'cueOffset', 'fixationOffset', 'saccadeEnd',
-                                  'targetAcqLost']
+                    flip_names = ['fixationOnset', 'targetOnset', 'cueOnset', 'cueOffset', 'fixationOffset',
+                                  'saccadeEnd', 'targetAcqLost']
 
                     # trial class = 108*(r-1) + 54*(y-1) + 9*(x-1) + z
 
                     # r is cueColumn; 1 for u|l correct, 2 for d|r corr, rand per trial
-                    r = np.ceil(temp / 108)
-                    temp = temp - 108 * (r - 1)
+                    r = np.ceil(type_classes / 108)
+                    type_classes = type_classes - 108 * (r - 1)
 
                     # y is 1 for u/d, 2 for l/r, chosen randomly per block
-                    y = np.ceil(temp/54)
-                    temp = temp - 54*(y-1)
+                    y = np.ceil(type_classes/54)
+                    temp = type_classes - 54*(y-1)
 
-                    # x is cueRow in cueMatrix, in 1:6, (determines targ/dist colour pairings per block)
-                    x = np.ceil(temp / 9)
-                    temp = temp - 9 * (x - 1)
+                    # x is cue_row in cue_matrix, in 1:6, (determines targ/dist colour pairings per block)
+                    x = np.ceil(type_classes / 9)
+                    type_classes = type_classes - 9 * (x - 1)
 
                     # z in 1:9, rand per block. Indexes into target,distractor pairings
-                    # t order: 1 2 3 1 2 3 1 2 3 into targDistGroups(t_ix, r, y, 1)
-                    # d order: 1 1 1 2 2 2 3 3 3 into targDistGroups(d_ix, r, y, 2)
-                    z = temp
+                    # t order: 1 2 3 1 2 3 1 2 3 into targdist_groups(t_ix, r, y, 1)
+                    # d order: 1 1 1 2 2 2 3 3 3 into targdist_groups(d_ix, r, y, 2)
+                    z = type_classes
                     t_ix = z % 3
                     t_ix[t_ix == 0] = 3
                     d_ix = np.ceil(z/3)
 
-                    targ_ix[b_type] = targDistGroups[
-                        np.ravel_multi_index((t_ix, r, y, np.ones(t_ix.shape)), targDistGroups.shape)]
-                    dist_ix[b_type] = targDistGroups[
-                        np.ravel_multi_index((d_ix, r, y, 2 * np.ones(t_ix.shape)), targDistGroups.shape)]
-                    cueCol_ix[b_type] = np.ravel_multi_index((x, r), cueMatrix.shape)
-                    annulus_ix[b_type] = np.ones(annulus_ix[b_type].shape)
+                    targ_ix[b_type] = targdist_groups[
+                        np.ravel_multi_index((t_ix, r, y, np.ones(t_ix.shape)), targdist_groups.shape)]
+                    dist_ix[b_type] = targdist_groups[
+                        np.ravel_multi_index((d_ix, r, y, 2 * np.ones(t_ix.shape)), targdist_groups.shape)]
+                    cue_colour_ix[b_type] = np.ravel_multi_index((x, r), cue_matrix.shape)
+                    annulus_ix[b_type] = 0
                     contexts[b_type] = context_options[(y-1)*2 + r]
                 else:
                     logger.error("trial type not recognized.")
 
-            """
-            %% Save to trial structure
-    %.newType = 'M', 'A', 'SR3', or 'SR4'
-    %.cueColour = 'r', 'g', or 'b'
-    %.trainingLevel = 0: full exp; 1: fix only; 2: fix & dist; 3: full exp &
-    %invis dist; 4: 3 + extra cue; 5: 4 + extra cue
-    %.targRule = 'UU', 'UR', 'RR', etc. OR 'AnyUp', 'AnyRight', etc.
-    %.targClass = in 1:8 for 8 locations, or in 1:16 with two annuli.
-    %.targPol = [theta radius]
-    %.targXY = [x y] coordinates in screen pixels.
-    %(also distClass, distPol, distXY)
-    
-    [trials(trialBool).newType] = trialTypes{:};
-    
-    %Cue colours
-    trCueColour = cueMatrix(cueCol_ix);
-    trCueColour = cueColourMap(trCueColour);
-    [trials(trialBool).cueColour] = trCueColour{:};
-    
-    %Training levels
-    trainingLevels = num2cell(trainingLevels);
-    [trials(trialBool).trainingLevel] = trainingLevels{:};
-    
-    %Contexts
-    [trials(trialBool).targRule] = contexts{:};
-    
-    % Save target/distractor to trial structure
-    trRadii = radius(annulus_ix);
-    
-    targDist = {'targ' 'dist'};
-    td_ix = [targ_ix dist_ix];
-    td_bool = [targBool distBool];
-    for td = 1:2 %For targets and distractors.
-        this_ix = td_ix(:, td);  % Indices into targetTheta
-        this_bool = td_bool(:, td);  % If this trial had a targ/dist
-        % stimulus class of 8 (or 16) possible locations
-        trClass = nan(nTrials, 1);
-        trClass(this_bool) = this_ix(this_bool);
-        trClass(annulus_ix > 1) = annulus_ix(annulus_ix > 1).*trClass(annulus_ix > 1);
-        trClass = num2cell(trClass);
-        [trials(trialBool).([targDist{td} 'Class'])] = trClass{:};
-        % Angle - needed for below
-        trTheta = nan(nTrials, 1);
-        trTheta(this_bool) = targetTheta(this_ix(this_bool));
-        % Pol, assuming centre = 0, 0
-        trPol = num2cell([trTheta trRadii], 2);
-        [trials(trialBool).([targDist{td} 'Pol'])] = trPol{:};
-        % Coordinates in screen pixels
-        [trX, trY] = pol2cart(trTheta, trRadii);
-        trXY = round(bsxfun(@plus, centrePt + fixJitterXY, [trX trY]));
-        trXY = num2cell(trXY, 2);
-        [trials(trialBool).([targDist{td} 'XY'])] = trXY{:};
-        %String representing direction.
-        trStr = cell(nTrials, 1);
-        trStr(this_bool) = targetStr(this_ix(this_bool));
-        [trials(trialBool).([targDist{td} 'Str'])] = trStr{:};
-    end
-            """
+            # Start filling in stim_info
+            stim_info['NewType'][b_trial] = trial_types
+            stim_info['CueColour'][b_trial] = cue_colour_map[cue_matrix.flatten()[cue_colour_ix]]
+            stim_info['TrainingLevel'][b_trial] = training_levels
+            stim_info['TargetRule'][b_trial] = contexts
+            stim_info['Radius'][b_trial] = np.array(radius)[annulus_ix]
 
+            # Process fields for targets and distractors.
+            targdist_ix = np.stack((targ_ix, dist_ix), axis=-1)
+            b_td = np.stack((b_targ, b_dist), axis=-1)
+            for td, tdstr in enumerate(['Target', 'Distractor']):
+                b_is_td = b_td[:, td]         # If trial had a target/distractor
+                this_ix = targdist_ix[b_is_td, td]  # Indices into target_theta
+
+                # Stimulus class of 8 (or 16) possible locations.
+                tr_class = np.zeros((n_trials,), dtype=int)
+                tr_class[b_is_td] = this_ix
+                tr_class[annulus_ix > 0] = tr_class[annulus_ix > 0] * (1 + annulus_ix[annulus_ix > 0])
+                stim_info[tdstr + 'Class'][b_trial] = tr_class
+
+                # Polar coordinates: theta and radius. Radius does not depend on t/d and is done already.
+                tr_theta = np.nan * np.ones((n_trials,))
+                tr_theta[b_is_td] = target_theta[this_ix]
+                stim_info[tdstr + 'Theta'][b_trial] = tr_theta
+
+                # Coordinates in screen pixels
+                stim_info[tdstr + 'X'][b_trial] = stim_info['Radius'] * np.cos(tr_theta)\
+                                                  + centre_point[0] + fix_jitter_xy[0]
+                stim_info[tdstr + 'Y'][b_trial] = stim_info['Radius'] * np.sin(tr_theta)\
+                                                  + centre_point[1] + fix_jitter_xy[1]
+
+                # String for direction
+                tr_str = np.array([''] * n_trials, dtype=object)
+                tr_str[b_is_td] = target_str[this_ix]
+                stim_info[tdstr + 'Str'][b_trial] = tr_str
+
+        df = df.assign(**stim_info).infer_objects()
+
+        # Save online eyetracker calibration adjustments
+        if 'CALADJ' in mat:
+            gaze_calib_adjust = mat['CALADJ']
+        elif 'eyePosCalibAdjust' in mat['eData'].dtype.names:
+            gaze_calib_adjust = mat['eData']['eyePosCalibAdjust'][()]
+        else:
+            gaze_calib_adjust = None
 
         iax = InstanceAxis(df['Time'].values, data=df.drop(columns=['Time']).to_records(index=False))
         ev_blk = Block(data=np.nan * np.ones((len(iax),)), axes=(iax,))
         ev_props = {Flags.is_event_stream: True,
                     'gaze_calib_adjust': (gaze_calib_adjust,),  # Need to hide in tuple so it doesn't break enumerator
-                    'ptb_params': {k: mat['params'][k][()] for k in mat['params'].dtype.names}
+                    'ptb_params': {**{k: mat['params'][k][()] for k in mat['params'].dtype.names},
+                                   'flip_names': flip_names}
                     }
 
         self._data = Packet(chunks={'markers': Chunk(block=ev_blk, props=ev_props)})
