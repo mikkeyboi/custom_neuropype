@@ -117,7 +117,19 @@ class ImportPTB(Node):
                         'EyelinkTime': tr_dat['eyeSyncTime']/1000. + ev_t_delta
                     }
                     df = df.append({**tr, **ev_dict}, ignore_index=True)
-        df = df.infer_objects()
+
+            # Also add two more events from flipScreen field that are not found in other trial fields.
+            for fs_ix, fs_str in enumerate(['Fixation', 'Target']):
+                if len(tr_dat['flipScreen']) > fs_ix:
+                    ev_dict = {
+                        'Marker': fs_str,
+                        'Time': trial_t0 + tr_dat['flipScreen'][fs_ix],
+                        'EyelinkTime': tr_dat['eyeSyncTime']/1000. + tr_dat['flipScreen'][fs_ix]
+                    }
+                    df = df.append({**tr, **ev_dict}, ignore_index=True)
+
+        # Fixup dataframe: Sort by Time, attempt to auto-convert floats to ints.
+        df = df.sort_values('Time').reset_index(drop=True).infer_objects()
 
         centre_point = mat['params']['subjectScreenResolution'][()] / 2
 
@@ -380,6 +392,7 @@ class ImportPTB(Node):
         else:
             gaze_calib_adjust = None
 
+        # Save the output in Neuropype format.
         iax = InstanceAxis(df['Time'].values, data=df.drop(columns=['Time']).to_records(index=False))
         ev_blk = Block(data=np.nan * np.ones((len(iax),)), axes=(iax,))
         ev_props = {Flags.is_event_stream: True,
@@ -387,5 +400,4 @@ class ImportPTB(Node):
                     'ptb_params': {**{k: mat['params'][k][()] for k in mat['params'].dtype.names},
                                    'flip_names': flip_names}
                     }
-
         self._data = Packet(chunks={'markers': Chunk(block=ev_blk, props=ev_props)})
