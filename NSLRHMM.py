@@ -23,8 +23,8 @@ class NSLRHMM(Node):
                            and a related event classification method based on Hidden Markov Models.
                            
                            Need to install nslr and nslr-hmm.
-                           First choice but fails: pip install git+https://github.com/pupil-labs/nslr.git
-                           Instead use: pip install git+https://gitlab.com/nslr/nslr
+                           First choice (Win/Linux): pip install git+https://github.com/pupil-labs/nslr.git
+                           Mac: pip install git+https://gitlab.com/nslr/nslr
                            then: pip install git+https://github.com/pupil-labs/nslr-hmm
                            """,
                            version='0.1',
@@ -35,13 +35,60 @@ class NSLRHMM(Node):
         for n, chnk in enumerate_chunks(pkt, nonempty=True, only_signals=True, with_axes=(time,)):
             import nslr
             import nslr_hmm
+            import pandas as pd
 
             ts = chnk.block.axes[time].times
+            xs = chnk.block[time, ...].data
             # Segmentation using Pruned Exact Linear Time (PELT)
             segmentation = nslr.fit_gaze(ts, xs, structural_error=self.structural_error,
-                                         optimize_noise=self.optimize_noise,
-                                         split_likelihood=self.split_likelihood)
+                                         optimize_noise=self.optimize_noise)
             seg_classes = nslr_hmm.classify_segments(segmentation.segments)
+
+            if False:
+                COLORS = {
+                    nslr_hmm.FIXATION: 'blue',
+                    nslr_hmm.SACCADE: 'black',
+                    nslr_hmm.SMOOTH_PURSUIT: 'green',
+                    nslr_hmm.PSO: 'yellow',
+                }
+                import matplotlib.pyplot as plt
+                plt.plot(ts, xs[:, 0], '.')
+                for seg_ix, seg in enumerate(segmentation.segments):
+                    plt.plot(seg.t, np.array(seg.x)[:, 0],
+                             linestyle='--', linewidth=2,
+                             color=COLORS[seg_classes[seg_ix]])
+                plt.show()
+
+            seg_class_str_map = {
+                nslr_hmm.FIXATION: 'Fixation',
+                nslr_hmm.SACCADE: 'Saccade',
+                nslr_hmm.SMOOTH_PURSUIT: 'SmoothPursuit',
+                nslr_hmm.PSO: 'PSO'
+            }
+
+            seg_ts = np.stack([(_.t[0], _.t[-1]) for _ in segmentation.segments], axis=-1)
+            seg_xs = np.stack([np.vstack((_.x[0], _.x[-1])) for _ in segmentation.segments], axis=-1)
+            ev_dict = {
+                'StartTime': seg_ts[0],
+                'EndTime': seg_ts[1],
+                'Marker': [seg_class_str_map[_] for _ in seg_classes],
+                'Duration': seg_ts[1] - seg_ts[0],
+                'Amp': np.linalg.norm(seg_xs[1, :, :] - seg_xs[0, :, :], axis=0),
+            }
+            for dim_ix, dim_name in enumerate(['X', 'Y']):
+                ev_dict.update({
+                    'Start' + dim_name: seg_xs[0, dim_ix, :],
+                    'Pos' + dim_name: seg_xs[1, dim_ix, :]
+                })
+
+            ev_df = pd.DataFrame(ev_dict)
+
+            ev_dat = ev_df.drop(['StartTime'], axis=1).to_records(index=False)
+            ev_blk = Block(data=np.nan * np.ones((len(ev_dat),)),
+                           axes=(InstanceAxis(ev_df['StartTime'], data=ev_dat),))
+
+            pkt.chunks[n] = Chunk(block=ev_blk, props=[Flags.is_event_stream])
+
         self._data = pkt
 
 
