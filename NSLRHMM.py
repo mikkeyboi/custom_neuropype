@@ -13,7 +13,6 @@ class NSLRHMM(Node):
     # --- Properties ---
     structural_error = FloatPort(0.1)
     optimize_noise = BoolPort(True)
-    split_likelihood = StringPort()
 
     @classmethod
     def description(cls):
