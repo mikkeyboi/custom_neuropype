@@ -103,6 +103,7 @@ class VaryingLDA(Node):
         """Declare descriptive information about the node."""
         return Description(name='Varying Linear Discriminant Analysis',
                            description="""\
+                           https://www.frontiersin.org/articles/10.3389/fnins.2019.00901/full
                            """,
                            version='0.1.0', status=DevStatus.alpha)
 
