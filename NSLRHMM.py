@@ -11,7 +11,10 @@ class NSLRHMM(Node):
                 editable=False, mutating=True)
 
     # --- Properties ---
-    structural_error = FloatPort(0.1)
+    noise_std = ListPort([0.3, 0.3])
+    saccade_amplitude = FloatPort(3.0)
+    slow_phase_duration = FloatPort(0.3)
+    slow_phase_speed = FloatPort(5.0)
     optimize_noise = BoolPort(True)
 
     @classmethod
@@ -39,8 +42,15 @@ class NSLRHMM(Node):
             ts = chnk.block.axes[time].times
             xs = chnk.block[time, ...].data
             # Segmentation using Pruned Exact Linear Time (PELT)
-            segmentation = nslr.fit_gaze(ts, xs, structural_error=self.structural_error,
-                                         optimize_noise=self.optimize_noise)
+            if True:
+                splitter = nslr.gaze_split(np.mean(self.noise_std), saccade_amplitude=self.saccade_amplitude,
+                                           slow_phase_duration=self.slow_phase_duration,
+                                           slow_phase_speed=self.slow_phase_speed)
+                model = nslr.Nslr2d(self.noise_std, splitter)
+                segmentation = nslr.nslr2d(ts, xs, model)
+            else:
+                segmentation = nslr.fit_gaze(ts, xs, structural_error=np.mean(self.noise_std),
+                                             optimize_noise=self.optimize_noise)
             seg_classes = nslr_hmm.classify_segments(segmentation.segments)
 
             if False:
