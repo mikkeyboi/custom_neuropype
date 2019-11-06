@@ -15,7 +15,7 @@ from neuropype.nodes.machine_learning._shared import apply_predictor
 logger = logging.getLogger(__name__)
 
 
-class VaryingLDA(Node):
+class VariantLDA(Node):
     """Use Varying Linear Discriminant Analysis to classify data instances."""
 
     # --- Input/output ports ---
@@ -79,6 +79,10 @@ class VaryingLDA(Node):
         For example, if this is set to 'time', then LDA will be performed for each time point independently.
         The final LDA scores come from summing the LDA across entries in this axis for each class.
         """, verbose_name='LDA performed independently for each entry in this axis.')
+    smoothing_window = IntPort(default=2, domain=[0, np.inf], help="""
+        Perform bidirectional smoothing over the independent axis with a window length of this size.
+        See manuscript section 2.7.
+        """)
     verbosity = IntPort(0, None, """Verbosity level. Higher numbers will produce
         more extensive diagnostic output.""", verbose_name='verbosity level')
     cond_field = StringPort(default='TargetValue', help="""The name of the
@@ -88,7 +92,19 @@ class VaryingLDA(Node):
     n_components = IntPort(default=None, help="""The number of components to keep in the
         reduced model""")
 
-    def __init__(self, probabilistic: Union[bool, None, Type[Keep]] = Keep, solver: Union[str, None, Type[Keep]] = Keep, class_weights: Union[object, None, Type[Keep]] = Keep, tolerance: Union[float, None, Type[Keep]] = Keep, shrinkage: Union[bool, None, Type[Keep]] = Keep, initialize_once: Union[bool, None, Type[Keep]] = Keep, dont_reset_model: Union[bool, None, Type[Keep]] = Keep, verbosity: Union[int, None, Type[Keep]] = Keep, cond_field: Union[str, None, Type[Keep]] = Keep, n_components: Union[int, None, Type[Keep]] = Keep, **kwargs):
+    def __init__(self,
+                 probabilistic: Union[bool, None, Type[Keep]] = Keep,
+                 solver: Union[str, None, Type[Keep]] = Keep,
+                 class_weights: Union[object, None, Type[Keep]] = Keep,
+                 tolerance: Union[float, None, Type[Keep]] = Keep,
+                 shrinkage: Union[bool, None, Type[Keep]] = Keep,
+                 initialize_once: Union[bool, None, Type[Keep]] = Keep,
+                 dont_reset_model: Union[bool, None, Type[Keep]] = Keep,
+                 smoothing_window: Union[int, None, Type[Keep]] = Keep,
+                 verbosity: Union[int, None, Type[Keep]] = Keep,
+                 cond_field: Union[str, None, Type[Keep]] = Keep,
+                 n_components: Union[int, None, Type[Keep]] = Keep,
+                 **kwargs):
         """Create a new node. Accepts initial values for the ports."""
         # unlike many other NeuroPype nodes, machine learning nodes usually do
         # not support multiple parallel data streams (these are supposed to have
@@ -96,7 +112,10 @@ class VaryingLDA(Node):
         # exception is that there may be a data stream containing the labels if
         # the model shall be retrained; still, the state holds only a single model
         self.M = {}  # predictive model
-        super().__init__(probabilistic=probabilistic, solver=solver, class_weights=class_weights, tolerance=tolerance, shrinkage=shrinkage, initialize_once=initialize_once, dont_reset_model=dont_reset_model, verbosity=verbosity, cond_field=cond_field, n_components=n_components, **kwargs)
+        super().__init__(probabilistic=probabilistic, solver=solver, class_weights=class_weights, tolerance=tolerance,
+                         shrinkage=shrinkage, initialize_once=initialize_once, dont_reset_model=dont_reset_model,
+                         smoothing_window=smoothing_window, verbosity=verbosity, cond_field=cond_field,
+                         n_components=n_components, **kwargs)
 
     @classmethod
     def description(cls):
@@ -140,6 +159,17 @@ class VaryingLDA(Node):
                 # Keep the last axis in its native type.
                 view = X.block[axis_definers[self.independent_axis], instance, ...]
             n_models, n_trials, n_features = view.shape
+            data = deepcopy_most(view.data)
+
+            # bidirectional smoothing over independent_axis
+            if self.smoothing_window > 1:
+                from scipy.ndimage.filters import uniform_filter1d
+                # First forwards
+                data = uniform_filter1d(data.reshape(n_models, -1)[::-1], size=self.smoothing_window,
+                                        axis=0, mode='nearest')
+                # Then backwards
+                data = uniform_filter1d(data[::-1], size=self.smoothing_window, axis=0, mode='nearest')
+                data = data.reshape(n_models, n_trials, n_features)
 
             # Train an independent model for each entry in the self.independent_axis
             logger.info("Now training {} LDAs, 1 for each element in {}.".format(n_models, view.axes[0].type_str))
@@ -153,7 +183,7 @@ class VaryingLDA(Node):
                 temp = LDA(**lda_args)
                 # finally fit the model given the data -- this line assumes that
                 # the predicted value is one-dimensional (per trial, so it's a vector over trials)
-                temp.fit(view.data[m_ix], y.reshape(-1))
+                temp.fit(data[m_ix], y.reshape(-1))
                 # Save the result
                 models.append(temp)
 
