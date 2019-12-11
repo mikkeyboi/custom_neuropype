@@ -12,7 +12,7 @@ class GetUnityTaskEvents(Node):
 
     @classmethod
     def description(cls):
-        return Description(name='Get Behaviour for Michael Saccade VR study',
+        return Description(name='Get Behaviour for Michael Saccade VR study (New submodule post Sept 10 revisions)',
                            description="""Parse marker strings into table of data""",
                            version='0.1',
                            license=Licenses.MIT)
@@ -39,17 +39,17 @@ class GetUnityTaskEvents(Node):
             """
             Input event markers:
                 TrialState:
+                    condition (int): See conditiontype_map
                     isCorrect (bool)
+                    modifier (int): See modifiertype_map
                     trialIndex (uint)
-                    taskType (int): See tasktype_map
-                    inhibitionIndex: See countermand_map
+                    response: See responsetype_map
                     cuedPositionIndex: See position_map
                     targetPositionIndex: See position_map
-                    targetObjectIndex (int): Different stimuli. 0, 1, 2, 3, 4, 5, 6, 7, 8, 9
-                    selectedObjectIndex (int): in -1,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9
+                    targetObjectIndex (int): 0
+                    selectedObjectIndex (int): in -1, 0
                     selectedPositionIndex: in -1, 0, 1
-                    environmentIndex: 0
-                    targetColorIndex: 3
+                    targetColorIndex: -1
                     trialPhaseIndex: see phase_map
                 Input: An event whenever a user input is registered (e.g., gaze collides with object)
                     trialIndex (int)
@@ -66,10 +66,11 @@ class GetUnityTaskEvents(Node):
             phase_map = {1: 'Intertrial', 2: 'Fixate', 3: 'Cue', 4: 'Delay', 5: 'Target',
                          6: 'Go', 7: 'Countermand', 8: 'Response', 9: 'Feedback', -1: 'UserInput'}
             phase_inv_map = {v: k for k, v in phase_map.items()}
-            tasktype_map = {0: 'AttendShape', 1: 'AttendColour', 2: 'AttendDirection'}
-            countermand_map = {0: 'Prosaccade', 1: 'TargetSwitch', 2: 'NoGo', 3: 'Antisaccade'}
+            modifiertype_map = {0: 'None', 1: 'Cued', 2: 'MemoryGuided', 3: 'NoGo', 4: 'Catch'}
+            conditiontype_map = {0: 'None', 1:'AttendShape', 2: 'AttendColour', 3: 'AttendNumber', 4: 'AttendDirection', 5: 'AttendPosition', 6: 'AttendFixation'}
+            # Note: ResponseType 3 to 5 are added post data collection to expedite analysis
+            responsetype_map = {0: 'None', 1: 'Prosaccade', 2: 'Antisaccade', 3: 'CuedSaccade', 4: 'NoGoProsaccade', 5: 'NoGoAntisaccade'}
             position_map = {-1: 'Unknown', 0: 'Left', 1: 'Right', 2: 'NoGo'}
-            cue_type_map = {0: 'Prosaccade', 1: 'Antisaccade'}
 
             """
             There are many more events than we need, including events for positioning invisible targets and changing
@@ -88,11 +89,11 @@ class GetUnityTaskEvents(Node):
             - Last Input event must be CentralFixation to proceed.
             - ObjectInfo to show the cue. (_isVisible: True)
             - TrialState with trialPhaseIndex=3 to indicate cue phase.
-            - multiple ObjectInfo events with _isVisible False while the cue disappears and targets are positioned.
+            - ObjectInfo shows colour change of cue to indicate Prosaccade/Antisaccade trial.
+            <Additional ObjectInfo to show target in Cued trials>
             - TrialState with trialPhaseIndex=4 for the Delay (memory) period.
-            - ObjectInfo events to make the targets visible.
             - TrialState event with trialPhaseIndex 5 to indicate this is the target phase (map memory to saccade plan)
-            - ObjectInfo with CentralFixation set to _isVisible False. This is the imperative go cue.
+            <CHECK>- ObjectInfo with CentralFixation set to _isVisible False. This is the imperative go cue.
             - TrialState with trialPhaseIndex 6 to indicate the Go phase. TODO: Check if the time is same as above.
             - (Optional) Input event after fixation disappears because we are now selecting CentralWall behind fixation.
             - (if countermanding) ObjectInfo when fixation reappears. Start of countermanding.
@@ -111,14 +112,15 @@ class GetUnityTaskEvents(Node):
             field_name_type_prop = [
                 ('UnityTrialIndex', int, ValueProperty.INTEGER + ValueProperty.NONNEGATIVE),
                 ('Marker', object, ValueProperty.STRING + ValueProperty.CATEGORY),  # Used to hold trial phase.
-                ('TaskType', object, ValueProperty.STRING + ValueProperty.CATEGORY),
-                ('CountermandingType', object, ValueProperty.STRING + ValueProperty.CATEGORY),
+                ('ModifierType', object, ValueProperty.STRING + ValueProperty.CATEGORY),
+                ('ConditionType', object, ValueProperty.STRING + ValueProperty.CATEGORY),
+                ('ResponseType', object, ValueProperty.STRING + ValueProperty.CATEGORY),
                 ('CuedPosition', object, ValueProperty.STRING + ValueProperty.CATEGORY),
                 ('CuedObject', object, ValueProperty.STRING + ValueProperty.CATEGORY),
                 ('TargetPosition', object, ValueProperty.STRING + ValueProperty.CATEGORY),
                 ('TargetObjectIndex', int, ValueProperty.INTEGER + ValueProperty.CATEGORY),
                 # ('TargetColour', object, ValueProperty.STRING + ValueProperty.CATEGORY),
-                ('EnvironmentIndex', int, ValueProperty.INTEGER + ValueProperty.NONNEGATIVE),
+                # ('EnvironmentIndex', int, ValueProperty.INTEGER + ValueProperty.NONNEGATIVE),
                 ('CountermandingDelay', float, ValueProperty.UNKNOWN),
                 ('SelectedPosition', object, ValueProperty.STRING + ValueProperty.CATEGORY),
                 ('SelectedObjectIndex', int, ValueProperty.INTEGER + ValueProperty.CATEGORY),
@@ -176,21 +178,27 @@ class GetUnityTaskEvents(Node):
                 fbstate = tr_events[tr_phases == phase_inv_map['Feedback']][0]['TrialState']
                 details = {
                     'UnityTrialIndex': fbstate['trialIndex'],
-                    'TaskType': tasktype_map[fbstate['taskType']],
-                    'CountermandingType': countermand_map[fbstate['inhibitionIndex']],
-                    'CuedPosition': position_map[fbstate['cuedPositionIndex']],
+                    'ModifierType': modifiertype_map[fbstate['modifier']],
+                    'ConditionType': conditiontype_map[fbstate['condition']],
+                    'ResponseType': responsetype_map[fbstate['response']] if fbstate['modifier'] == 0 else 'CuedOrNoGo',
+                    'CuedPosition': position_map[fbstate['cuePositionIndex']],
                     'TargetPosition': position_map[fbstate['targetPositionIndex']],
                     'TargetObjectIndex': fbstate['targetObjectIndex'],  # TODO: Map to object name
                     # 'TargetColour': color_map[fbstate['targetColorIndex']],
-                    'EnvironmentIndex': fbstate['environmentIndex'],    # TODO: Map to environment name.
+                    # 'EnvironmentIndex': fbstate['environmentIndex'],    # TODO: Map to environment name.
                     'SelectedPosition': position_map[fbstate['selectedPositionIndex']],
                     'SelectedObjectIndex': fbstate['selectedObjectIndex'],  # TODO: Map to object name
                     'IsCorrect': fbstate['isCorrect'],
                     'CountermandingDelay': np.nan,
-                    'ReactionTime': np.nan,
+                    'ReactionTime': np.nan
+                    # No need for CueTypeIndex, ResponseType indicates whether trial is Pro or Anti-saccade
                     # CueTypeIndex. For "TaskSwitch" experiment, tells if trial is Pro or Anti-saccade.
-                    'CueTypeIndex': cue_type_map[fbstate['saccadeIndex']] if 'saccadeIndex' in fbstate else -1
+                    # 'CueTypeIndex': cue_type_map[fbstate['saccadeIndex']] if 'saccadeIndex' in fbstate else -1
                 }
+                # Additional ResponseTypes are added in analysis (here), for comparing against conditions
+                if details['ResponseType'] == 'CuedOrNoGo':
+                    details['ResponseType'] = 'CuedSaccade' if fbstate['modifier'] == 1 \
+                        else ('NoGoProsaccade' if fbstate['response'] == 1 else 'NoGoAntisaccade')
 
                 # Get some more details that we can only get from events.
                 df_to_extend = []
@@ -254,7 +262,7 @@ class GetUnityTaskEvents(Node):
 
                 # Event 7 (optional) - Countermanding cue.
                 # Get countermanding delay
-                if details['CountermandingType'] != 'Prosaccade' and phase_inv_map['Countermand'] in tr_phases:
+                if details['ResponseType'] != 'Prosaccade' and phase_inv_map['Countermand'] in tr_phases:
                     df_to_extend.append({'Marker': 'Countermand'})
 
                     # Find last fixation-visible event before response period.
