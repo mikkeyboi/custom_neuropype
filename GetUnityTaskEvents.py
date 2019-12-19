@@ -27,6 +27,7 @@ class GetUnityTaskEvents(Node):
             import json
             dict_arr = mrk_chnk.block.axes[instance].data['Marker']
             events = []
+            no_dupe = False
             for ix, ev in enumerate(dict_arr):
                 # Fix some mistakes in the json encoding in Unity
                 dat = json.loads(ev)
@@ -34,6 +35,23 @@ class GetUnityTaskEvents(Node):
                     dat = {'CameraRecenter': dat['CameraRecenter:']}
                 if 'Input:' in dat:
                     dat = {'Input': dat['Input:']}
+                # Make sure TrialState only happens once per phase change
+                if 'TrialState' in dat and not no_dupe:
+                    if dat['TrialState']['trialPhaseIndex'] is 9:
+                        no_dupe = True
+                        tmp = dat
+                        continue
+                if no_dupe:
+                    if 'TrialState' in dat:
+                        if dat['TrialState']['outcome'] is 'Good trial':
+                            dat['TrialState']['isCorrect'] = True
+                            events.append(dat)
+                            no_dupe = False
+                            # tmp does not get appended because it's a duplicate
+                            continue
+                    events.append(tmp)
+                    no_dupe = False
+                    # tmp and dat both get appended, because there's no duplicate
                 events.append(dat)
 
             """
