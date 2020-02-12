@@ -28,9 +28,6 @@ class GetUnityTaskEvents(Node):
             import json
             dict_arr = mrk_chnk.block.axes[instance].data['Marker']
             events = []
-            no_dupe = False
-            iti_fix = False
-            tmp_ev = [] # To store in buffer when fixes are necessary
             for ix, ev in enumerate(dict_arr):
                 # Fix some mistakes in the json encoding in Unity
                 dat = json.loads(ev)
@@ -38,45 +35,6 @@ class GetUnityTaskEvents(Node):
                     dat = {'CameraRecenter': dat['CameraRecenter:']}
                 if 'Input:' in dat:
                     dat = {'Input': dat['Input:']}
-                # Make sure TrialState only happens once per phase change
-                if 'TrialState' in dat and not no_dupe:
-                    if dat['TrialState']['trialPhaseIndex'] == 9:
-                        no_dupe = True
-                        tmp = copy.deepcopy(dat) # dict.copy() only works for primitive datatypes
-                        continue
-                if no_dupe:
-                    if 'TrialState' in dat:
-                        if dat['TrialState']['outcome'] != 'Early response':
-                            if dat['TrialState']['trialPhaseIndex'] == 1:
-                                # Prevent missing trialPhase 1
-                                tr1 = copy.deepcopy(dat)
-                                iti_fix = True
-                            # Retrofit phase 9 because correct information was contained in phase 1
-                            dat['TrialState']['trialPhaseIndex'] = 9
-                            events.append(dat)
-                            for misc in tmp_ev:
-                                events.append(misc)
-                            if iti_fix:
-                                events.append(tr1)
-                            # Reset params
-                            no_dupe = False
-                            iti_fix = False
-                            tr1['TrialState']['isCorrect'] = False
-                            tr1['TrialState']['outcome'] = 'Early response'
-                            tmp_ev.clear()
-                            # tmp does not get appended because it's a duplicate or wrong
-                            continue
-                        # For normal files..
-                        else:
-                            events.append(tmp)
-                            for misc in tmp_ev:
-                                events.append(misc)
-                            events.append(dat)
-                            no_dupe = False
-                            tmp_ev.clear()
-                            continue
-                    tmp_ev.append(dat)
-                    continue
                 events.append(dat)
 
             """
@@ -105,9 +63,11 @@ class GetUnityTaskEvents(Node):
                     _pointingTo (x,y,z)
                 CameraRecenter: (bool) Camera height and yaw recentered on user
             """
+
             # Trial phase indices map to trial phases
-            phase_map = {1: 'Intertrial', 2: 'Fixate', 3: 'Cue', 4: 'Delay', 5: 'Target',
-                         6: 'Go', 7: 'Countermand', 8: 'Response', 9: 'Feedback', -1: 'UserInput'}
+            phase_map = {0: 'Setup', 1: 'Intertrial', 2: 'Fixation', 3: 'Cue', 4: 'Delay_1', 5: 'Target',
+                         6: 'Delay_2', 7: 'Distractor', 8: 'Delay_3', 9: 'Countermanding', 10: 'Delay_4', 11: 'Response',
+                         12: 'Feedback', 13: 'Delay_5', 14: 'Misc', 15: 'Selector', 16: 'Null', -1: 'UserInput'}
             phase_inv_map = {v: k for k, v in phase_map.items()}
             modifiertype_map = {0: 'None', 1: 'Cued', 2: 'MemoryGuided', 3: 'NoGo', 4: 'Catch'}
             conditiontype_map = {0: 'None', 1:'AttendShape', 2: 'AttendColour', 3: 'AttendNumber', 4: 'AttendDirection', 5: 'AttendPosition', 6: 'AttendFixation'}
@@ -124,31 +84,32 @@ class GetUnityTaskEvents(Node):
             Note that the ObjectInfo events occur before their associated TrialState event, so the most accurate
             timestamps will come from ObjectInfo, not TrialState.
             
-            Trial lifecycle:
-            - ObjectInfo event when target is placed but still invisible
-            - TrialState event with trialPhaseIndex 1 to indicate intertrial
-            - Input event (>=1) to indicate subject is selecting CentralFixation / CentralWall.
-            - TrialState with trialPhaseIndex = 2 to indicate Fixate phase.
-            - Last Input event must be CentralFixation to proceed.
-            - ObjectInfo to show the cue. (_isVisible: True)
-            - TrialState with trialPhaseIndex=3 to indicate cue phase.
-            - ObjectInfo shows colour change of cue to indicate Prosaccade/Antisaccade trial.
+            Trial life cycle (Shortest 15 Events):
+            1- ObjectInfo event when target is placed but still invisible
+            2- TrialState event with trialPhaseIndex 1 to indicates intertrial
+             - Input event (>=1) to indicate subject is selecting CentralFixation / CentralWall.
+            3- TrialState with trialPhaseIndex = 2 to indicate Fixation phase.
+            4- ObjectInfo to show the cue. (_isVisible: True)
+            5- TrialState with trialPhaseIndex=3 to indicate cue phase.
+            6- ObjectInfo shows colour change of cue to indicate Prosaccade/Antisaccade trial.
             <Additional ObjectInfo to show target in Cued trials>
-            - TrialState with trialPhaseIndex=4 for the Delay (memory) period.
-            - TrialState event with trialPhaseIndex 5 to indicate this is the target phase (map memory to saccade plan)
-            <CHECK>- ObjectInfo with CentralFixation set to _isVisible False. This is the imperative go cue.
-            - TrialState with trialPhaseIndex 6 to indicate the Go phase. TODO: Check if the time is same as above.
-            - (Optional) Input event after fixation disappears because we are now selecting CentralWall behind fixation.
-            - (if countermanding) ObjectInfo when fixation reappears. Start of countermanding.
-            - (if countermanding) Input when fixation goes back on to central
-            - TrialState with trialPhaseIndex 7 to indicate beginning of countermanding phase, whether or not stim given
-            - ObjectInfo when CentralFixation disappears again
-            - TrialState with trialPhaseIndex 8 to indicate beginning of Response phase
-            - Input to indicate hitting target (or non-target, or opposite wall in antisaccade)
-            - ObjectInfo to clear out CentralFixation
-            - TrialState with trialPhaseIndex 8 again, but this time the isCorrect has changed.
-            - TrialState with trialPhaseIndex 9 to indicate feedback phase.
-            The next ObjectInfo event indicates the start of the next trial
+            7- Input event selects fixation point (!! TODO: This should be during the gating phase)
+            8- TrialState event with trialPhaseIndex=4 for the Delay (memory) period.
+            9- TrialState event with trialPhaseIndex=6 to indicate this is the variable delay phase (map memory to saccade plan)
+            10- TrialState event with trialPhaseIndex=15 to select whether the trial is countermanding or not
+            11- ObjectInfo events: _isVisible: True for showing _identity: Target (For Cued Trials, this happens during Cue Phase)
+            12- ObjectInfo events: _isVisible: False indicates GO imperative
+            13- TrialState with trialPhaseIndex=11 to indicate the Go phase. TODO: Check if the time is same as above.
+            14- Input event selects the target
+            15- TrialState event with trialPhaseIndex=12 to indicate feedback phase (!! IsCorrect changes here !!)
+            
+            Countermanding trial life cycle (~17 Events)
+            1-12 are the same as the above
+            13- TrialState event with trialPhaseIndex=9 to indicate countermand
+            14- ObjectInfo event when fixation reappear. Start of countermanding.
+            15- TrialState with trialPhaseIndex=11 to indicate Response phase. This is when the subject has to maintain fixation
+            16- TrialState event with trialPhaseIndex=12 to indicate feedback phase (!! IsCorrect changes here !!)
+            17- ObjectInfo (start of new trial but seems like after countermanding there's an additional ObjectInfo to hide the fixation)
             """
 
             # Output table will have the following fields
@@ -177,7 +138,7 @@ class GetUnityTaskEvents(Node):
             # Identify the trial index for each event, even the ObjectInfo and Input events.
             ev_types = np.array([list(_.keys())[0] for _ in events])
             last_tr_ind = 0
-            last_phase = 9
+            last_phase = 12
             object_bump = False
             ev_tr = []
             for ev_ix, ev in enumerate(events):
@@ -185,8 +146,8 @@ class GetUnityTaskEvents(Node):
                     last_phase = ev['TrialState']['trialPhaseIndex']
                     last_tr_ind = ev['TrialState']['trialIndex']
                     object_bump = False
-                elif ev_types[ev_ix] == 'ObjectInfo' and last_phase == 9 and not object_bump:
-                    # The first ObjectInfo event after a phase-9 event is the start of a new trial.
+                elif ev_types[ev_ix] == 'ObjectInfo' and last_phase == 12 and not object_bump:
+                    # The first ObjectInfo event after a phase-12 event is the start of a new trial.
                     last_tr_ind += 1
                     object_bump = True
                 ev_tr.append(last_tr_ind)
@@ -258,12 +219,12 @@ class GetUnityTaskEvents(Node):
                 out_times.append(tr_times[iti_ix])
 
                 # Event 2 - Fixation achieved. Use phase transition.
-                if phase_inv_map['Fixate'] in tr_phases:
-                    df_to_extend.append({'Marker': 'Fixate'})
-                    fix_start_ix = np.where(tr_phases == phase_inv_map['Fixate'])[0][0]
+                if phase_inv_map['Fixation'] in tr_phases:
+                    df_to_extend.append({'Marker': 'Fixation'})
+                    fix_start_ix = np.where(tr_phases == phase_inv_map['Fixation'])[0][0]
                     out_times.append(tr_times[fix_start_ix])
 
-                # Event 3 - Cue presentation. Transition to phase 3 and Object appears (maybe reversed order)
+                # Event 3 - Cue presentation. Transition to phaseIndex 3 and Object appears (maybe reversed order)
                 if phase_inv_map['Cue'] in tr_phases:
                     df_to_extend.append({'Marker': 'Cue'})
                     cue_ix = np.where(tr_phases == phase_inv_map['Cue'])[0][0]
@@ -272,32 +233,32 @@ class GetUnityTaskEvents(Node):
                     # details['CuedObject'] = tr_obj_id[obj_ix]
                     out_times.append(tr_times[cue_ix])  # TODO: use obj_ix in new experiment.
 
-                # Event 4 - Delay period. ObjectInfo cue disappears; transition to phase 4.
-                if phase_inv_map['Delay'] in tr_phases:
-                    df_to_extend.append({'Marker': 'Delay'})
+                # Event 4 - Delay period. ObjectInfo cue disappears; transition to phaseIndex 4.
+                if phase_inv_map['Delay_1'] in tr_phases:
+                    df_to_extend.append({'Marker': 'Delay_1'})
                     pre_ix = np.where(tr_phases == phase_inv_map['Cue'])[0][0]
-                    ph_ix = np.where(tr_phases == phase_inv_map['Delay'])[0][0]
+                    ph_ix = np.where(tr_phases == phase_inv_map['Delay_1'])[0][0]
                     del_ix = pre_ix + np.where(tr_is_obj[pre_ix:ph_ix])[0][0]
                     out_times.append(tr_times[del_ix])
 
-                # Event 5 - Target presentation. ObjectInfo targets appear; transition to phase 5.
-                if phase_inv_map['Target'] in tr_phases:
-                    df_to_extend.append({'Marker': 'Target'})
-                    targ_ix = np.where(np.logical_and(tr_obj_id == 'Target', tr_obj_is_vis))[0]
+                # Event 5 - Target presentation. ObjectInfo targets appear; transition to phaseIndex 6.
+                if phase_inv_map['Delay_2'] in tr_phases:
+                    df_to_extend.append({'Marker': 'Delay_2'})
+                    targ_ix = np.where(np.logical_and(tr_obj_id == 'Delay_2', tr_obj_is_vis))[0]
                     if len(targ_ix) > 0:
                         targ_ix = targ_ix[-1]
                     else:
-                        targ_ix = np.where(tr_phases == phase_inv_map['Target'])[0][0]
+                        targ_ix = np.where(tr_phases == phase_inv_map['Delay_2'])[0][0]
                     out_times.append(tr_times[targ_ix])
 
-                # Event 6 - Imperative cue. Fixation pt disappears. Transition to Phase 6.
-                if phase_inv_map['Go'] in tr_phases:
+                # Event 6 - Imperative cue. Fixation pt disappears. Transition to phaseIndex 15.
+                if phase_inv_map['Selector'] in tr_phases:
                     df_to_extend.append({'Marker': 'Go'})
                     go_ix = np.where(np.logical_and(tr_obj_id == 'CentralFixation', ~tr_obj_is_vis))[0]
                     if len(go_ix) > 0:
                         go_ix = go_ix[0]
                     else:
-                        go_ix = np.where(tr_phases == phase_inv_map['Go'])[0][0]
+                        go_ix = np.where(tr_phases == phase_inv_map['Selector'])[0][0]
                     go_time = tr_times[go_ix]
                     out_times.append(go_time)
                 else:
@@ -305,7 +266,7 @@ class GetUnityTaskEvents(Node):
 
                 # Event 7 (optional) - Countermanding cue.
                 # Get countermanding delay
-                if details['ResponseType'] != 'Prosaccade' and phase_inv_map['Countermand'] in tr_phases:
+                if details['ResponseType'] != 'Prosaccade' and phase_inv_map['Countermanding'] in tr_phases:
                     df_to_extend.append({'Marker': 'Countermand'})
 
                     # Find last fixation-visible event before response period.
@@ -315,7 +276,7 @@ class GetUnityTaskEvents(Node):
                     if len(cm_ix) > 0:
                         cm_ix = cm_ix[-1]
                     else:
-                        cm_ix = np.where(tr_phases == phase_inv_map['Countermand'])[0][0]
+                        cm_ix = np.where(tr_phases == phase_inv_map['Countermanding'])[0][0]
                     details['CountermandingDelay'] = tr_times[cm_ix] - go_time
                     out_times.append(tr_times[cm_ix])
 
